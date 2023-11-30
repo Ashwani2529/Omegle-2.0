@@ -1,7 +1,7 @@
 const express = require("express");
 const path = require("path");
 const bodyparser = require("body-parser");
-
+const cors = require("cors");
 const app = express();
 const connectDB = require("./Server/database/connection");
 
@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 8080;
 
 connectDB();
 app.use(bodyparser.urlencoded({ extended: true }));
-
+app.use(cors());
 app.use(bodyparser.json());
 
 app.set("view engine", "ejs");
