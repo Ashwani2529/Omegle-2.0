@@ -10,7 +10,9 @@ const PORT = process.env.PORT || 8080;
 
 connectDB();
 app.use(bodyparser.urlencoded({ extended: true }));
-app.use(cors());
+app.use(cors({origin:'https://omegle-ob2d.onrender.com',
+methods:'GET,HEAD,PUT,PATCH,POST,DELETE',
+allowedHeaders:'*'}));
 app.use(bodyparser.json());
 
 app.set("view engine", "ejs");
