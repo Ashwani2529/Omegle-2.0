@@ -1,9 +1,8 @@
 let localStream;
 let username;
 let remoteUser;
-let url = new URL(window.location.href);
-// // username = url.searchParams.get("username");
-// remoteUser = url.searchParams.get("remoteuser");
+let currentSessionId = null;
+let userState = 'idle'; // 'idle', 'queued', 'matched', 'in-call'
 let peerConnection;
 let remoteStream;
 let sendChannel;
@@ -13,64 +12,210 @@ var msgSendBtn = document.querySelector(".msg-send-button");
 var chatTextArea = document.querySelector(".chat-text-area");
 
 var omeID = localStorage.getItem("omeID");
-if (omeID) {
-  username = omeID;
-  $.ajax({
-    url: "/new-user-update/" + omeID + "",
-    type: "PUT",
-    success: function (response) {
-      console.log(response);
-    },
-  });
-} else {
-  var postData = "Demo Data";
-  $.ajax({
-    type: "POST",
-    url: "/api/users",
-    data: postData,
-    success: function (response) {
-      console.log(response);
+
+async function initializeUser() {
+  if (omeID) {
+    username = omeID;
+    try {
+      await $.ajax({
+        url: "/new-user-update/" + omeID,
+        type: "PUT"
+      });
+      console.log("User reactivated:", username);
+    } catch (error) {
+      console.error("Error reactivating user:", error);
+    }
+  } else {
+    try {
+      const response = await $.ajax({
+        type: "POST",
+        url: "/api/users",
+        data: { postData: "Demo Data" }
+      });
+      console.log("New user created:", response);
       localStorage.setItem("omeID", response);
       username = response;
-    },
-    error: function (error) {
-      console.log(error);
-    },
-  });
+      omeID = response;
+    } catch (error) {
+      console.error("Error creating user:", error);
+    }
+  }
 }
 
 let init = async () => {
-  localStream = await navigator.mediaDevices.getUserMedia({
-    video: true,
-    audio: true,
-  });
-  document.getElementById("user-1").srcObject = localStream;
-  $.post("https://omegle-ob2d.onrender.com/get-remote-users", { omeID: omeID })
-    .done(function (data) {
-      console.log("Remoteuser id from Init() /get-remote-users: ", data[0]._id);
-      if (data[0]) {
-        if (data[0]._id == remoteUser || data[0]._id == username) {
-        } else {
-          remoteUser = data[0]._id;
-          createOffer(data[0]._id);
-        }
-      }
-    })
-    .fail(function (xhr, textStatus, errorThrown) {
-      console.log(xhr.responseText);
+  try {
+    // Initialize user first
+    await initializeUser();
+    
+    if (!username) {
+      throw new Error("Failed to initialize user");
+    }
+    
+    // Get user media
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
     });
-};
-init();
-
-let socket = io.connect();
-
-socket.on("connect", () => {
-  if (socket.connected) {
-    socket.emit("userconnect", {
-      displayName: username,
-    });
+    document.getElementById("user-1").srcObject = localStream;
+    console.log("Local video stream established");
+    
+    // Connect to socket after user is initialized
+    connectSocket();
+    
+    // Show initial UI state
+    updateUIState('idle');
+    
+  } catch (error) {
+    console.error("Initialization error:", error);
+    alert("Error initializing the application. Please check camera/microphone permissions and try again.");
   }
+};
+
+// Update UI based on current state
+function updateUIState(state, message = '') {
+  userState = state;
+  const chatArea = document.querySelector(".chat-text-area");
+  const nextButton = document.querySelector(".next-chat");
+  
+  switch (state) {
+    case 'idle':
+      chatArea.innerHTML = "<div style='color: #666; font-style: italic;'>Press 'Next' to start chatting with strangers! omeID: " + omeID + "</div>";
+      nextButton.textContent = "Start";
+      nextButton.style.pointerEvents = "auto";
+      break;
+    case 'queued':
+      chatArea.innerHTML = `<div style='color: orange; font-style: italic;'>${message || 'Looking for someone to chat with...'} omeID: ${omeID}</div>`;
+      nextButton.textContent = "Cancel";
+      nextButton.style.pointerEvents = "auto";
+      break;
+    case 'matched':
+      chatArea.innerHTML = "<div style='color: blue; font-style: italic;'>Stranger found! Connecting...</div>";
+      nextButton.textContent = "Next";
+      nextButton.style.pointerEvents = "none"; // Disable during connection
+      break;
+    case 'in-call':
+      if (!chatArea.innerHTML.includes("You are now chatting")) {
+        chatArea.innerHTML = "<div style='color: green; font-style: italic;'>You are now chatting with a random stranger</div><div style='color: green; font-style: italic;'>You both speak the same language - English</div><hr class='horizontal-divider'>";
+      }
+      nextButton.textContent = "Next";
+      nextButton.style.pointerEvents = "auto";
+      break;
+  }
+}
+
+// Queue timeout functionality
+let queueTimeout = null;
+const QUEUE_TIMEOUT_MS = 30000; // 30 seconds
+
+function startQueueTimeout() {
+  if (queueTimeout) {
+    clearTimeout(queueTimeout);
+  }
+  
+  queueTimeout = setTimeout(() => {
+    if (userState === 'queued') {
+      console.log("Queue timeout reached");
+      socket.emit("leaveQueue", { userId: username });
+      updateUIState('idle', 'No one available right now. Try again later.');
+    }
+  }, QUEUE_TIMEOUT_MS);
+}
+
+function clearQueueTimeout() {
+  if (queueTimeout) {
+    clearTimeout(queueTimeout);
+    queueTimeout = null;
+  }
+}
+
+// Initialize everything when page loads
+$(document).ready(function() {
+  // Add some delay to ensure page is fully loaded
+  setTimeout(() => {
+    init();
+  }, 500);
 });
+
+let socket;
+
+function connectSocket() {
+  socket = io.connect();
+  
+  socket.on("connect", () => {
+    if (socket.connected && username) {
+      socket.emit("userconnect", {
+        displayName: username,
+      });
+      console.log("Socket connected for user:", username);
+    }
+  });
+
+  // Queue management events
+  socket.on("queueStatus", function(data) {
+    console.log("Queue status update:", data);
+    updateUIState('queued', data.message);
+    
+    if (data.status === 'queued') {
+      startQueueTimeout();
+    } else {
+      clearQueueTimeout();
+    }
+  });
+
+  socket.on("matchFound", function(data) {
+    console.log("Match found:", data);
+    clearQueueTimeout(); // Stop queue timeout
+    
+    currentSessionId = data.sessionId;
+    remoteUser = data.remoteUser;
+    updateUIState('matched');
+    
+    // Start WebRTC connection based on role
+    if (data.role === 'caller') {
+      // Wait a moment for UI update, then create offer
+      setTimeout(() => createOffer(data.remoteUser), 500);
+    }
+    // If callee, wait for offer to arrive
+  });
+
+  socket.on("sessionEnded", function(data) {
+    console.log("Session ended:", data);
+    handleSessionEnded(data);
+  });
+  
+  // WebRTC signaling events
+  socket.on("ReceiveOffer", function (data) {
+    console.log("Received offer from:", data.username, "Session:", data.sessionId);
+    if (data.sessionId === currentSessionId) {
+      createAnswer(data);
+    }
+  });
+  
+  socket.on("ReceiveAnswer", function (data) {
+    console.log("Received answer from:", data.sender, "Session:", data.sessionId);
+    if (data.sessionId === currentSessionId) {
+      addAnswer(data);
+    }
+  });
+  
+  socket.on("candidateReceiver", function (data) {
+    if (peerConnection && data.sessionId === currentSessionId) {
+      console.log("Received ICE candidate for session:", data.sessionId);
+      peerConnection.addIceCandidate(data.iceCandidateData)
+        .catch(error => console.error("Error adding ICE candidate:", error));
+    }
+  });
+
+  socket.on("error", function(data) {
+    console.error("Socket error:", data);
+    alert(data.message);
+  });
+  
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected");
+    updateUIState('idle', 'Disconnected from server');
+  });
+}
 let servers = {
   iceServers: [
     {
@@ -83,28 +228,46 @@ let createPeerConnection = async () => {
   peerConnection = new RTCPeerConnection(servers);
 
   remoteStream = new MediaStream();
-
   document.getElementById("user-2").srcObject = remoteStream;
 
+  // Add local tracks to peer connection
   localStream.getTracks().forEach((track) => {
     peerConnection.addTrack(track, localStream);
   });
+
+  // Handle incoming remote stream
   peerConnection.ontrack = async (event) => {
+    console.log("Remote track received:", event.track.kind);
     event.streams[0].getTracks().forEach((track) => {
       remoteStream.addTrack(track);
     });
+    
+    // Update chat status
+    const chatArea = document.querySelector(".chat-text-area");
+    chatArea.innerHTML += "<div style='color: green; font-style: italic;'>Stranger connected!</div>";
   };
 
-  remoteStream.oninactive = () => {
-    remoteStream.getTracks().forEach((track) => {
-      track.enabled = !track.enabled;
-    });
-    peerConnection.close();
+  // Handle connection state changes
+  peerConnection.onconnectionstatechange = () => {
+    console.log("Connection state:", peerConnection.connectionState);
+    if (peerConnection.connectionState === 'connected') {
+      updateUIState('in-call');
+      console.log("WebRTC connection established for session:", currentSessionId);
+    } else if (peerConnection.connectionState === 'disconnected' || 
+               peerConnection.connectionState === 'failed') {
+      console.log("WebRTC connection lost");
+      if (userState === 'in-call') {
+        updateUIState('idle', 'Connection lost. Press Next to try again.');
+      }
+    }
   };
 
+  // Handle ICE candidates
   peerConnection.onicecandidate = async (event) => {
-    if (event.candidate) {
+    if (event.candidate && currentSessionId) {
+      console.log("Sending ICE candidate for session:", currentSessionId);
       socket.emit("candidateSentToUser", {
+        sessionId: currentSessionId,
         username: username,
         remoteUser: remoteUser,
         iceCandidateData: event.candidate,
@@ -112,6 +275,7 @@ let createPeerConnection = async () => {
     }
   };
 
+  // Create data channel for chat
   sendChannel = peerConnection.createDataChannel("sendDataChannel");
   sendChannel.onopen = () => {
     console.log("Data channel is now open and ready to use");
@@ -119,23 +283,31 @@ let createPeerConnection = async () => {
   };
 
   peerConnection.ondatachannel = receiveChannelCallback;
-
-  // sendChannel.onmessage=onSendChannelMessageCallBack;
 };
 function sendData() {
-  const msgData = msgInput.value;
+  const msgData = msgInput.value.trim();
+  
+  if (!msgData) {
+    return; // Don't send empty messages
+  }
+  
   chatTextArea.innerHTML +=
     "<div style='margin-top:2px; margin-bottom:2px;'><b>Me: </b>" +
     msgData +
     "</div>";
-  if (sendChannel) {
-    onSendChannelStateChange();
+    
+  // Auto-scroll to bottom
+  chatTextArea.scrollTop = chatTextArea.scrollHeight;
+  
+  if (sendChannel && sendChannel.readyState === "open") {
     sendChannel.send(msgData);
-    msgInput.value = "";
-  } else {
+  } else if (receiveChannel && receiveChannel.readyState === "open") {
     receiveChannel.send(msgData);
-    msgInput.value = "";
+  } else {
+    console.warn("No data channel available to send message");
   }
+  
+  msgInput.value = "";
 }
 function receiveChannelCallback(event) {
   console.log("Receive Channel Callback");
@@ -150,6 +322,9 @@ function onReceiveChannelMessageCallback(event) {
     "<div style='margin-top:2px; margin-bottom:2px;'><b>Stranger: </b>" +
     event.data +
     "</div>";
+    
+  // Auto-scroll to bottom
+  chatTextArea.scrollTop = chatTextArea.scrollHeight;
 }
 function onReceiveChannelStateChange() {
   const readystate = receiveChannel.readystate;
@@ -175,201 +350,332 @@ function onSendChannelStateChange() {
     );
   }
 }
-function fetchNextUser(remoteUser) {
-  $.post(
-    "https://omegle-ob2d.onrender.com/get-next-user",
-    { omeID: omeID, remoteUser: remoteUser },
-    function (data) {
-      console.log("Next user is: ", data);
-      if (data[0]) {
-        if (data[0]._id == remoteUser || data[0]._id == username) {
-        } else {
-          remoteUser = data[0]._id;
-          createOffer(data[0]._id);
-        }
+async function fetchNextUser(currentRemoteUser) {
+  try {
+    console.log("Fetching next user. Current user:", username, "Previous remote:", currentRemoteUser);
+    
+    const data = await $.post("/get-next-user", { 
+      omeID: omeID, 
+      remoteUser: currentRemoteUser 
+    });
+    
+    console.log("Next user found:", data);
+    if (data && data.length > 0) {
+      const nextUser = data[0];
+      if (nextUser._id !== username) { // Only exclude current user, allow reconnection to previous
+        remoteUser = nextUser._id;
+        console.log("Connecting to user:", remoteUser);
+        
+        // Clear previous status messages
+        const chatArea = document.querySelector(".chat-text-area");
+        chatArea.innerHTML = "<div style='color: blue; font-style: italic;'>Connecting to stranger...</div>";
+        
+        createOffer(nextUser._id);
+      } else {
+        console.log("Got same user as self, retrying...");
+        setTimeout(() => fetchNextUser(currentRemoteUser), 2000);
       }
+    } else {
+      console.log("No next user available, retrying...");
+      
+      // Update status message
+      const chatArea = document.querySelector(".chat-text-area");
+      chatArea.innerHTML = "<div style='color: orange; font-style: italic;'>Looking for strangers...</div>";
+      
+      setTimeout(() => fetchNextUser(currentRemoteUser), 3000);
     }
-  );
+  } catch (error) {
+    console.error("Error fetching next user:", error);
+    setTimeout(() => fetchNextUser(currentRemoteUser), 5000);
+  }
 }
 let createOffer = async (remoteU) => {
-  createPeerConnection();
-  let offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  socket.emit("offerSentToRemote", {
-    username: username,
-    remoteUser: remoteU,
-    offer: peerConnection.localDescription,
-  });
-  console.log("from Offer");
+  try {
+    console.log("Creating offer for remote user:", remoteU, "Session:", currentSessionId);
+    createPeerConnection();
+    let offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    
+    socket.emit("offerSentToRemote", {
+      sessionId: currentSessionId,
+      username: username,
+      remoteUser: remoteU,
+      offer: peerConnection.localDescription,
+    });
+    
+    console.log("Offer sent to remote user:", remoteU);
+  } catch (error) {
+    console.error("Error creating offer:", error);
+    updateUIState('idle', 'Failed to connect. Try again.');
+  }
 };
 
 let createAnswer = async (data) => {
-  remoteUser = data.username;
-
-  createPeerConnection();
-  await peerConnection.setRemoteDescription(data.offer);
-  let answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
-  socket.emit("answerSentToUser1", {
-    answer: answer,
-    sender: data.remoteUser,
-    receiver: data.username,
-  });
-  console.log("from answer");
-  document.querySelector(".next-chat").style.pointerEvents = "auto";
-  $.ajax({
-    url: "/update-on-engagement/" + username + "",
-    type: "PUT",
-    success: function (response) {},
-  });
+  try {
+    console.log("Creating answer for session:", data.sessionId);
+    createPeerConnection();
+    await peerConnection.setRemoteDescription(data.offer);
+    let answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    
+    socket.emit("answerSentToUser1", {
+      sessionId: currentSessionId,
+      answer: answer,
+      sender: data.remoteUser,
+      receiver: data.username,
+    });
+    
+    console.log("Answer created and sent for session:", currentSessionId);
+  } catch (error) {
+    console.error("Error creating answer:", error);
+    updateUIState('idle', 'Failed to connect. Try again.');
+  }
 };
-
-socket.on("ReceiveOffer", function (data) {
-  createAnswer(data);
-});
 
 let addAnswer = async (data) => {
-  if (!peerConnection.currentRemoteDescription) {
-    peerConnection.setRemoteDescription(data.answer);
+  if (peerConnection && !peerConnection.currentRemoteDescription) {
+    await peerConnection.setRemoteDescription(data.answer);
+    document.querySelector(".next-chat").style.pointerEvents = "auto";
+    
+    try {
+      await $.ajax({
+        url: "/update-on-engagement/" + username,
+        type: "PUT"
+      });
+      console.log("User engagement updated");
+    } catch (error) {
+      console.error("Error updating engagement:", error);
+    }
   }
-  document.querySelector(".next-chat").style.pointerEvents = "auto";
-  $.ajax({
-    url: "/update-on-engagement/" + username + "",
-    type: "PUT",
-    success: function (response) {},
-  });
 };
 
-socket.on("ReceiveAnswer", function (data) {
-  addAnswer(data);
-});
-socket.on("closedRemoteUser", function (data) {
-  // .................Newly Added..........................
-  const remoteStream = peerConnection.getRemoteStreams()[0];
-  remoteStream.getTracks().forEach((track) => track.stop());
+function handleRemoteUserClosed() {
+  if (peerConnection) {
+    try {
+      const remoteStream = peerConnection.getRemoteStreams()[0];
+      if (remoteStream) {
+        remoteStream.getTracks().forEach((track) => track.stop());
+      }
 
-  peerConnection.close();
-  const remoteVid = document.getElementById("user-2");
+      peerConnection.close();
+      const remoteVid = document.getElementById("user-2");
 
-  if (remoteVid.srcObject) {
-    remoteVid.srcObject.getTracks().forEach((track) => track.stop());
-    remoteVid.srcObject = null;
+      if (remoteVid.srcObject) {
+        remoteVid.srcObject.getTracks().forEach((track) => track.stop());
+        remoteVid.srcObject = null;
+      }
+      
+      $.ajax({
+        url: "/update-on-next/" + username,
+        type: "PUT",
+        success: function (response) {
+          fetchNextUser(remoteUser);
+        },
+        error: function (error) {
+          console.error("Error updating user status:", error);
+        }
+      });
+    } catch (error) {
+      console.error("Error handling remote user closed:", error);
+    }
   }
-  // .................Newly Added..........................
-  $.ajax({
-    url: "/update-on-next/" + username + "",
-    type: "PUT",
-    success: function (response) {
-      fetchNextUser(remoteUser);
-    },
-  });
-});
-
-socket.on("candidateReceiver", function (data) {
-  peerConnection.addIceCandidate(data.iceCandidateData);
-  console.log("from candidateReceiver");
-});
+}
 
 msgSendBtn.addEventListener("click", function (event) {
   sendData();
 });
 
-window.addEventListener("unload", function (event) {
-  if (navigator.userAgent.indexOf("Chrome") != -1) {
-    $.ajax({
-      url: "/leaving-user-update/" + username + "",
-      type: "PUT",
-      success: function (response) {
-        console.log(response);
-      },
-    });
-    console.log("Leaving local user is: ", username);
-    // ..........................Newly Edited
-    $.ajax({
-      url: "/update-on-otherUser-closing/" + remoteUser + "",
-      type: "PUT",
-      success: function (response) {
-        console.log(response);
-      },
-    });
-    console.log("Leaving remote user is: ", remoteUser);
-    // ..........................Newly Edited
-    console.log("This is Chrome");
-  } else if (navigator.userAgent.indexOf("Firefox") != -1) {
-    // The browser is Firefox
-    $.ajax({
-      url: "/leaving-user-update/" + username + "",
-      type: "PUT",
-      async: false,
-      success: function (response) {
-        console.log(response);
-      },
-    });
-    console.log("Leaving local user is: ", username);
-    // ..........................Newly Edited
-    $.ajax({
-      url: "/update-on-otherUser-closing/" + remoteUser + "",
-      type: "PUT",
-      async: false,
-      success: function (response) {
-        console.log(response);
-      },
-    });
-    console.log("Leaving remote user is: ", remoteUser);
-    // ..........................Newly Edited
+// Add Enter key support for message input
+msgInput.addEventListener("keypress", function(event) {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendData();
+  }
+});
 
-    console.log("This is Firefox");
-  } else {
-    // The browser is not Chrome or Firefox
-    console.log("This is not Chrome or Firefox");
+window.addEventListener("beforeunload", function (event) {
+  // Clean up connections and update user status
+  if (username) {
+    navigator.sendBeacon("/leaving-user-update/" + username, "");
+    console.log("User leaving:", username);
+  }
+  
+  if (remoteUser) {
+    navigator.sendBeacon("/update-on-otherUser-closing/" + remoteUser, "");
+    console.log("Notifying remote user of disconnection:", remoteUser);
+  }
+  
+  // Close peer connection
+  if (peerConnection) {
+    peerConnection.close();
+  }
+  
+  // Stop local stream
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
   }
 });
 
 async function closeConnection() {
-  // .................Newly Added..........................
-  const remoteStream = peerConnection.getRemoteStreams()[0];
-  remoteStream.getTracks().forEach((track) => track.stop());
-  await peerConnection.close();
-  const remoteVid = document.getElementById("user-2");
-
-  if (remoteVid.srcObject) {
-    remoteVid.srcObject.getTracks().forEach((track) => track.stop());
-    remoteVid.srcObject = null;
+  try {
+    console.log("Closing connection with user:", remoteUser);
+    
+    if (peerConnection) {
+      // Close data channels
+      if (sendChannel) {
+        sendChannel.close();
+        sendChannel = null;
+      }
+      if (receiveChannel) {
+        receiveChannel.close();
+        receiveChannel = null;
+      }
+      
+      // Stop remote tracks
+      const remoteStream = peerConnection.getRemoteStreams()[0];
+      if (remoteStream) {
+        remoteStream.getTracks().forEach((track) => track.stop());
+      }
+      
+      peerConnection.close();
+      peerConnection = null;
+    }
+    
+    // Clear remote video
+    const remoteVid = document.getElementById("user-2");
+    if (remoteVid) {
+      if (remoteVid.srcObject) {
+        remoteVid.srcObject.getTracks().forEach((track) => track.stop());
+      }
+      remoteVid.srcObject = null;
+    }
+    
+    // Store current remote user before clearing
+    const currentRemoteUser = remoteUser;
+    
+    // Notify server and remote user BEFORE updating status
+    if (socket && remoteUser) {
+      socket.emit("remoteUserClosed", {
+        username: username,
+        remoteUser: remoteUser,
+      });
+    }
+    
+    // Clear remote user reference
+    remoteUser = null;
+    
+    // Update user status to available (status: "0") 
+    try {
+      await $.ajax({
+        url: "/update-on-next/" + username,
+        type: "PUT"
+      });
+      console.log("User status updated to available");
+    } catch (ajaxError) {
+      console.error("Error updating user status:", ajaxError);
+    }
+    
+    // Wait a moment before searching for next user
+    setTimeout(() => {
+      fetchNextUser(currentRemoteUser);
+    }, 1000);
+    
+    console.log("Connection closed successfully");
+  } catch (error) {
+    console.error("Error closing connection:", error);
   }
-  // .................Newly Added..........................
-  socket.emit("remoteUserClosed", {
-    username: username,
-    remoteUser: remoteUser,
-  });
-  $.ajax({
-    url: "/update-on-next/" + username + "",
-    type: "PUT",
-    success: function (response) {
-      fetchNextUser(remoteUser);
-    },
-  });
-
-  console.log("From closeConnection");
 }
 $(document).on("click", ".next-chat", function () {
-  document.querySelector(".chat-text-area").innerHTML = "";
-  // if (
-  //   peerConnection.connectionState === "connected" ||
-  //   peerConnection.iceCandidateState === "connected"
-  // ) {
-  closeConnection();
-  peerConnection.oniceconnectionstatechange = (event) => {
-    if (
-      peerConnection.iceConnectionState === "disconnected" ||
-      peerConnection.iceConnectionState === "closed"
-    ) {
-      // Peer connection is closed
-      console.log("Peer connection closed.");
-    }
-  };
-  //   console.log("User closed");
-  // } else {
-  //   fetchNextUser(remoteUser);
-  //   console.log("Moving to next user");
-  // }
+  console.log("Next button clicked. Current state:", userState);
+  
+  switch (userState) {
+    case 'idle':
+      // Start looking for someone
+      socket.emit("findMatch", { userId: username });
+      break;
+      
+    case 'queued':
+      // Cancel search
+      clearQueueTimeout();
+      socket.emit("leaveQueue", { userId: username });
+      updateUIState('idle');
+      break;
+      
+    case 'in-call':
+      // End current session and look for next person
+      endCurrentSession(true);
+      break;
+      
+    case 'matched':
+      // During connection phase, ignore clicks
+      console.log("Connection in progress, please wait...");
+      break;
+  }
 });
+
+function endCurrentSession(findNext = false) {
+  console.log("Ending current session:", currentSessionId);
+  
+  // Close WebRTC connection
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+  
+  // Clear remote video
+  const remoteVid = document.getElementById("user-2");
+  if (remoteVid && remoteVid.srcObject) {
+    remoteVid.srcObject.getTracks().forEach(track => track.stop());
+    remoteVid.srcObject = null;
+  }
+  
+  // Close data channels
+  if (sendChannel) {
+    sendChannel.close();
+    sendChannel = null;
+  }
+  if (receiveChannel) {
+    receiveChannel.close();
+    receiveChannel = null;
+  }
+  
+  // Notify server
+  if (currentSessionId) {
+    socket.emit("endSession", { 
+      userId: username, 
+      findNext: findNext 
+    });
+  }
+  
+  // Reset state
+  currentSessionId = null;
+  remoteUser = null;
+  
+  if (!findNext) {
+    updateUIState('idle');
+  }
+  
+  // Clear chat area
+  document.querySelector(".chat-text-area").innerHTML = "";
+}
+
+function handleSessionEnded(data) {
+  console.log("Session ended by other user:", data);
+  
+  // Clean up local state
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+  
+  const remoteVid = document.getElementById("user-2");
+  if (remoteVid && remoteVid.srcObject) {
+    remoteVid.srcObject.getTracks().forEach(track => track.stop());
+    remoteVid.srcObject = null;
+  }
+  
+  currentSessionId = null;
+  remoteUser = null;
+  
+  updateUIState('idle', data.reason || 'The other user disconnected');
+}

@@ -12,7 +12,7 @@ route.put("/leaving-user-update/:id", controller.leavingUserUpdate);
 route.put("/new-user-update/:id", controller.newUserUpdate);
 route.post("/get-remote-users", controller.remoteUserFind);
 route.put(
-  "/update-on-otheruser-closing/:id",
+  "/update-on-otherUser-closing/:id",
   controller.updateOnOtherUserClosing
 );
 route.put("/update-on-engagement/:id", controller.updateOnEngagement);

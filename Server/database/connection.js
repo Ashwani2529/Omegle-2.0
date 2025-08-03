@@ -1,12 +1,17 @@
 const mongoose = require("mongoose");
+const dotenv = require('dotenv');
+dotenv.config();
 
 const connectDB = async () => {
   try {
     //mongodb connection string
-    const con = await mongoose.connect('mongodb+srv://ashwanix2749:2749@cluster0.3x8suve.mongodb.net/');
+    const con = await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
     console.log(`MongoDB connected: ${con.connection.host}`);
   } catch (err) {
-    console.log(err);
+    console.log("MongoDB connection error:", err);
     process.exit(1);
   }
 };
