@@ -59,7 +59,8 @@ function addToQueue(userId, socketId) {
   userQueue.push({ userId, socketId, timestamp: Date.now() });
   userStates.set(userId, { state: 'queued', socketId });
   
-  console.log(`User ${userId} added to queue. Queue length: ${userQueue.length}`);
+  console.log(`📋 User ${userId} added to queue. Queue length: ${userQueue.length}`);
+  console.log(`Current queue:`, userQueue.map(u => ({ id: u.userId, socket: u.socketId })));
   
   // Try to match immediately
   tryMatchUsers();
@@ -70,7 +71,18 @@ function tryMatchUsers() {
     const user1 = userQueue.shift();
     const user2 = userQueue.shift();
     
+    // Safety check: Don't match user with themselves
+    if (user1.userId === user2.userId) {
+      console.log("Prevented self-matching for user:", user1.userId);
+      // Put user2 back in queue and try again
+      userQueue.unshift(user2);
+      return;
+    }
+    
     const sessionId = generateSessionId();
+    
+    console.log(`Attempting to match users: ${user1.userId} and ${user2.userId}`);
+    console.log(`User1 socket: ${user1.socketId}, User2 socket: ${user2.socketId}`);
     
     // Create session - but keep users in connecting state until WebRTC is established
     activeSessions.set(sessionId, {
@@ -85,7 +97,7 @@ function tryMatchUsers() {
     userStates.set(user1.userId, { state: 'matched', sessionId, socketId: user1.socketId });
     userStates.set(user2.userId, { state: 'matched', sessionId, socketId: user2.socketId });
     
-    console.log(`Matched users: ${user1.userId} and ${user2.userId} in session ${sessionId}`);
+    console.log(`✅ Successfully matched users: ${user1.userId} and ${user2.userId} in session ${sessionId}`);
     
     // Notify both users about the match
     io.to(user1.socketId).emit("matchFound", {
@@ -99,6 +111,8 @@ function tryMatchUsers() {
       remoteUser: user1.userId,
       role: 'callee' // user2 will receive the call
     });
+  } else {
+    console.log(`Queue has ${userQueue.length} users, need at least 2 to match`);
   }
 }
 

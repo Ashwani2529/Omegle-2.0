@@ -14,8 +14,8 @@ var chatTextArea = document.querySelector(".chat-text-area");
 var omeID = localStorage.getItem("omeID");
 
 async function initializeUser() {
-  if (omeID) {
-    username = omeID;
+if (omeID) {
+  username = omeID;
     try {
       await $.ajax({
         url: "/new-user-update/" + omeID,
@@ -25,11 +25,11 @@ async function initializeUser() {
     } catch (error) {
       console.error("Error reactivating user:", error);
     }
-  } else {
+} else {
     try {
       const response = await $.ajax({
-        type: "POST",
-        url: "/api/users",
+    type: "POST",
+    url: "/api/users",
         data: { postData: "Demo Data" }
       });
       console.log("New user created:", response);
@@ -52,11 +52,11 @@ let init = async () => {
     }
     
     // Get user media
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
-    document.getElementById("user-1").srcObject = localStream;
+  localStream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: true,
+  });
+  document.getElementById("user-1").srcObject = localStream;
     console.log("Local video stream established");
     
     // Connect to socket after user is initialized
@@ -140,12 +140,12 @@ let socket;
 
 function connectSocket() {
   socket = io.connect();
-  
-  socket.on("connect", () => {
+
+socket.on("connect", () => {
     if (socket.connected && username) {
-      socket.emit("userconnect", {
-        displayName: username,
-      });
+    socket.emit("userconnect", {
+      displayName: username,
+    });
       console.log("Socket connected for user:", username);
     }
   });
@@ -163,17 +163,28 @@ function connectSocket() {
   });
 
   socket.on("matchFound", function(data) {
-    console.log("Match found:", data);
+    console.log("🎯 Match found:", data);
+    console.log("My ID:", username, "Remote ID:", data.remoteUser);
+    
+    // Critical check: Prevent self-matching on client side too
+    if (data.remoteUser === username) {
+      console.error("❌ ERROR: Matched with self! Rejoining queue...");
+      socket.emit("findMatch", { userId: username });
+      return;
+    }
+    
     clearQueueTimeout(); // Stop queue timeout since we found a match
     
     currentSessionId = data.sessionId;
     remoteUser = data.remoteUser;
     updateUIState('matched', 'Stranger found! Establishing connection...');
     
+    console.log(`🔗 Session ${currentSessionId}: ${username} (${data.role}) ↔ ${remoteUser}`);
+    
     // Start WebRTC connection based on role
     if (data.role === 'caller') {
       // Wait a moment for UI update, then create offer
-      setTimeout(() => createOffer(data.remoteUser), 500);
+      setTimeout(() => createOffer(data.remoteUser), 1000);
     }
     // If callee, wait for offer to arrive
   });
@@ -225,34 +236,66 @@ let servers = {
 };
 
 let createPeerConnection = async () => {
+  console.log("🔗 Creating peer connection for session:", currentSessionId);
+  console.log("Local user:", username, "Remote user:", remoteUser);
+  
   peerConnection = new RTCPeerConnection(servers);
 
+  // Create separate remote stream
   remoteStream = new MediaStream();
-  document.getElementById("user-2").srcObject = remoteStream;
+  const remoteVideo = document.getElementById("user-2");
+  
+  // Important: Clear any existing source first
+  if (remoteVideo.srcObject) {
+    remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+    remoteVideo.srcObject = null;
+  }
+  
+  remoteVideo.srcObject = remoteStream;
+  console.log("🎥 Remote video element prepared");
 
   // Add local tracks to peer connection
   localStream.getTracks().forEach((track) => {
+    console.log("➕ Adding local track:", track.kind);
     peerConnection.addTrack(track, localStream);
   });
 
-  // Handle incoming remote stream
+  // Handle incoming remote stream - CRITICAL FIX
   peerConnection.ontrack = async (event) => {
-    console.log("Remote track received:", event.track.kind);
+    console.log("📡 Remote track received:", event.track.kind);
+    console.log("Stream ID:", event.streams[0].id);
+    
+    // Clear existing tracks first
+    remoteStream.getTracks().forEach(track => {
+      remoteStream.removeTrack(track);
+    });
+    
+    // Add new remote tracks
     event.streams[0].getTracks().forEach((track) => {
+      console.log("Adding remote track to stream:", track.kind, track.id);
       remoteStream.addTrack(track);
     });
     
-    // Update chat status
-    const chatArea = document.querySelector(".chat-text-area");
-    chatArea.innerHTML += "<div style='color: green; font-style: italic;'>Stranger connected!</div>";
+    // Ensure video element gets the stream
+    const remoteVideo = document.getElementById("user-2");
+    if (remoteVideo.srcObject !== remoteStream) {
+      remoteVideo.srcObject = remoteStream;
+      console.log("🎥 Remote video stream updated");
+    }
   };
 
   // Handle connection state changes
   peerConnection.onconnectionstatechange = () => {
-    console.log("Connection state:", peerConnection.connectionState);
+    console.log("🔄 Connection state:", peerConnection.connectionState);
     if (peerConnection.connectionState === 'connected') {
       updateUIState('in-call');
-      console.log("WebRTC connection established for session:", currentSessionId);
+      console.log("✅ WebRTC connection established for session:", currentSessionId);
+      
+      // Update chat status
+      const chatArea = document.querySelector(".chat-text-area");
+      if (!chatArea.innerHTML.includes("You are now chatting")) {
+        chatArea.innerHTML += "<div style='color: green; font-style: italic;'>✅ Connection established!</div>";
+      }
       
       // Notify server that connection is fully established
       socket.emit("connectionEstablished", {
@@ -262,21 +305,29 @@ let createPeerConnection = async () => {
       
     } else if (peerConnection.connectionState === 'disconnected' || 
                peerConnection.connectionState === 'failed') {
-      console.log("WebRTC connection lost");
+      console.log("❌ WebRTC connection lost/failed");
       if (userState === 'in-call') {
         updateUIState('idle', 'Connection lost. Press Next to try again.');
       } else if (userState === 'matched') {
         // Connection failed during initial setup, put user back in queue
-        console.log("Connection failed during setup, rejoining queue");
-        socket.emit("findMatch", { userId: username });
+        console.log("🔄 Connection failed during setup, rejoining queue");
+        updateUIState('idle', 'Connection failed. Trying again...');
+        setTimeout(() => {
+          socket.emit("findMatch", { userId: username });
+        }, 2000);
       }
     }
+  };
+
+  // Handle ICE connection state
+  peerConnection.oniceconnectionstatechange = () => {
+    console.log("🧊 ICE connection state:", peerConnection.iceConnectionState);
   };
 
   // Handle ICE candidates
   peerConnection.onicecandidate = async (event) => {
     if (event.candidate && currentSessionId) {
-      console.log("Sending ICE candidate for session:", currentSessionId);
+      console.log("🧊 Sending ICE candidate for session:", currentSessionId);
       socket.emit("candidateSentToUser", {
         sessionId: currentSessionId,
         username: username,
@@ -289,11 +340,13 @@ let createPeerConnection = async () => {
   // Create data channel for chat
   sendChannel = peerConnection.createDataChannel("sendDataChannel");
   sendChannel.onopen = () => {
-    console.log("Data channel is now open and ready to use");
+    console.log("💬 Data channel is now open and ready to use");
     onSendChannelStateChange();
   };
 
   peerConnection.ondatachannel = receiveChannelCallback;
+  
+  console.log("🔗 Peer connection setup complete");
 };
 function sendData() {
   const msgData = msgInput.value.trim();
@@ -382,7 +435,7 @@ async function fetchNextUser(currentRemoteUser) {
         chatArea.innerHTML = "<div style='color: blue; font-style: italic;'>Connecting to stranger...</div>";
         
         createOffer(nextUser._id);
-      } else {
+        } else {
         console.log("Got same user as self, retrying...");
         setTimeout(() => fetchNextUser(currentRemoteUser), 2000);
       }
@@ -402,11 +455,22 @@ async function fetchNextUser(currentRemoteUser) {
 }
 let createOffer = async (remoteU) => {
   try {
-    console.log("Creating offer for remote user:", remoteU, "Session:", currentSessionId);
+    console.log("📞 Creating offer for remote user:", remoteU, "Session:", currentSessionId);
+    
+    // Safety check
+    if (remoteU === username) {
+      console.error("❌ ERROR: Trying to create offer to self!");
+      return;
+    }
+    
     createPeerConnection();
-    let offer = await peerConnection.createOffer();
+    let offer = await peerConnection.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
     await peerConnection.setLocalDescription(offer);
     
+    console.log("📤 Sending offer to:", remoteU);
     socket.emit("offerSentToRemote", {
       sessionId: currentSessionId,
       username: username,
@@ -414,31 +478,43 @@ let createOffer = async (remoteU) => {
       offer: peerConnection.localDescription,
     });
     
-    console.log("Offer sent to remote user:", remoteU);
+    console.log("✅ Offer sent to remote user:", remoteU);
   } catch (error) {
-    console.error("Error creating offer:", error);
+    console.error("❌ Error creating offer:", error);
     updateUIState('idle', 'Failed to connect. Try again.');
   }
 };
 
 let createAnswer = async (data) => {
   try {
-    console.log("Creating answer for session:", data.sessionId);
+    console.log("📞 Creating answer for session:", data.sessionId);
+    console.log("Offer from:", data.username, "to me:", username);
+    
+    // Safety check
+    if (data.username === username) {
+      console.error("❌ ERROR: Received offer from self!");
+      return;
+    }
+    
     createPeerConnection();
     await peerConnection.setRemoteDescription(data.offer);
-    let answer = await peerConnection.createAnswer();
+    let answer = await peerConnection.createAnswer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
     await peerConnection.setLocalDescription(answer);
     
+    console.log("📤 Sending answer back to:", data.username);
     socket.emit("answerSentToUser1", {
       sessionId: currentSessionId,
       answer: answer,
-      sender: data.remoteUser,
+      sender: username,
       receiver: data.username,
     });
     
-    console.log("Answer created and sent for session:", currentSessionId);
+    console.log("✅ Answer created and sent for session:", currentSessionId);
   } catch (error) {
-    console.error("Error creating answer:", error);
+    console.error("❌ Error creating answer:", error);
     updateUIState('idle', 'Failed to connect. Try again.');
   }
 };
@@ -463,25 +539,25 @@ let addAnswer = async (data) => {
 function handleRemoteUserClosed() {
   if (peerConnection) {
     try {
-      const remoteStream = peerConnection.getRemoteStreams()[0];
+  const remoteStream = peerConnection.getRemoteStreams()[0];
       if (remoteStream) {
-        remoteStream.getTracks().forEach((track) => track.stop());
+  remoteStream.getTracks().forEach((track) => track.stop());
       }
 
-      peerConnection.close();
-      const remoteVid = document.getElementById("user-2");
+  peerConnection.close();
+  const remoteVid = document.getElementById("user-2");
 
-      if (remoteVid.srcObject) {
-        remoteVid.srcObject.getTracks().forEach((track) => track.stop());
-        remoteVid.srcObject = null;
-      }
+  if (remoteVid.srcObject) {
+    remoteVid.srcObject.getTracks().forEach((track) => track.stop());
+    remoteVid.srcObject = null;
+  }
       
-      $.ajax({
+  $.ajax({
         url: "/update-on-next/" + username,
-        type: "PUT",
-        success: function (response) {
-          fetchNextUser(remoteUser);
-        },
+    type: "PUT",
+    success: function (response) {
+      fetchNextUser(remoteUser);
+    },
         error: function (error) {
           console.error("Error updating user status:", error);
         }
@@ -543,9 +619,9 @@ async function closeConnection() {
       }
       
       // Stop remote tracks
-      const remoteStream = peerConnection.getRemoteStreams()[0];
+  const remoteStream = peerConnection.getRemoteStreams()[0];
       if (remoteStream) {
-        remoteStream.getTracks().forEach((track) => track.stop());
+  remoteStream.getTracks().forEach((track) => track.stop());
       }
       
       peerConnection.close();
@@ -553,23 +629,23 @@ async function closeConnection() {
     }
     
     // Clear remote video
-    const remoteVid = document.getElementById("user-2");
+  const remoteVid = document.getElementById("user-2");
     if (remoteVid) {
-      if (remoteVid.srcObject) {
-        remoteVid.srcObject.getTracks().forEach((track) => track.stop());
+  if (remoteVid.srcObject) {
+    remoteVid.srcObject.getTracks().forEach((track) => track.stop());
       }
-      remoteVid.srcObject = null;
-    }
+    remoteVid.srcObject = null;
+  }
     
     // Store current remote user before clearing
     const currentRemoteUser = remoteUser;
     
     // Notify server and remote user BEFORE updating status
     if (socket && remoteUser) {
-      socket.emit("remoteUserClosed", {
-        username: username,
-        remoteUser: remoteUser,
-      });
+  socket.emit("remoteUserClosed", {
+    username: username,
+    remoteUser: remoteUser,
+  });
     }
     
     // Clear remote user reference
