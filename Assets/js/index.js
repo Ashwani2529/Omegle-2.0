@@ -89,9 +89,9 @@ function updateUIState(state, message = '') {
       nextButton.style.pointerEvents = "auto";
       break;
     case 'matched':
-      chatArea.innerHTML = "<div style='color: blue; font-style: italic;'>Stranger found! Connecting...</div>";
-      nextButton.textContent = "Next";
-      nextButton.style.pointerEvents = "none"; // Disable during connection
+      chatArea.innerHTML = `<div style='color: blue; font-style: italic;'>${message || 'Stranger found! Establishing connection...'}</div>`;
+      nextButton.textContent = "Cancel";
+      nextButton.style.pointerEvents = "auto"; // Allow canceling during connection
       break;
     case 'in-call':
       if (!chatArea.innerHTML.includes("You are now chatting")) {
@@ -103,9 +103,9 @@ function updateUIState(state, message = '') {
   }
 }
 
-// Queue timeout functionality
+// Queue timeout functionality - extended timeout
 let queueTimeout = null;
-const QUEUE_TIMEOUT_MS = 30000; // 30 seconds
+const QUEUE_TIMEOUT_MS = 120000; // 2 minutes - much longer timeout
 
 function startQueueTimeout() {
   if (queueTimeout) {
@@ -114,7 +114,7 @@ function startQueueTimeout() {
   
   queueTimeout = setTimeout(() => {
     if (userState === 'queued') {
-      console.log("Queue timeout reached");
+      console.log("Queue timeout reached after 2 minutes");
       socket.emit("leaveQueue", { userId: username });
       updateUIState('idle', 'No one available right now. Try again later.');
     }
@@ -164,11 +164,11 @@ function connectSocket() {
 
   socket.on("matchFound", function(data) {
     console.log("Match found:", data);
-    clearQueueTimeout(); // Stop queue timeout
+    clearQueueTimeout(); // Stop queue timeout since we found a match
     
     currentSessionId = data.sessionId;
     remoteUser = data.remoteUser;
-    updateUIState('matched');
+    updateUIState('matched', 'Stranger found! Establishing connection...');
     
     // Start WebRTC connection based on role
     if (data.role === 'caller') {
@@ -253,11 +253,22 @@ let createPeerConnection = async () => {
     if (peerConnection.connectionState === 'connected') {
       updateUIState('in-call');
       console.log("WebRTC connection established for session:", currentSessionId);
+      
+      // Notify server that connection is fully established
+      socket.emit("connectionEstablished", {
+        userId: username,
+        sessionId: currentSessionId
+      });
+      
     } else if (peerConnection.connectionState === 'disconnected' || 
                peerConnection.connectionState === 'failed') {
       console.log("WebRTC connection lost");
       if (userState === 'in-call') {
         updateUIState('idle', 'Connection lost. Press Next to try again.');
+      } else if (userState === 'matched') {
+        // Connection failed during initial setup, put user back in queue
+        console.log("Connection failed during setup, rejoining queue");
+        socket.emit("findMatch", { userId: username });
       }
     }
   };
@@ -607,8 +618,10 @@ $(document).on("click", ".next-chat", function () {
       break;
       
     case 'matched':
-      // During connection phase, ignore clicks
-      console.log("Connection in progress, please wait...");
+      // During connection phase, allow canceling
+      console.log("Canceling connection attempt");
+      endCurrentSession(false);
+      updateUIState('idle', 'Connection canceled');
       break;
   }
 });

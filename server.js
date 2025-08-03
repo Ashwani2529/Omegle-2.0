@@ -72,15 +72,16 @@ function tryMatchUsers() {
     
     const sessionId = generateSessionId();
     
-    // Create session
+    // Create session - but keep users in connecting state until WebRTC is established
     activeSessions.set(sessionId, {
       user1: user1.userId,
       user2: user2.userId,
       sessionId,
-      startTime: Date.now()
+      startTime: Date.now(),
+      connectionStatus: 'connecting' // Track connection status
     });
     
-    // Update user states
+    // Update user states to matched (still not fully connected)
     userStates.set(user1.userId, { state: 'matched', sessionId, socketId: user1.socketId });
     userStates.set(user2.userId, { state: 'matched', sessionId, socketId: user2.socketId });
     
@@ -165,6 +166,7 @@ io.on("connection", (socket) => {
   // User wants to leave queue
   socket.on("leaveQueue", (data) => {
     const userId = data.userId;
+    console.log(`User ${userId} manually leaving queue`);
     removeFromQueue(userId);
     userStates.set(userId, { state: 'idle', socketId: socket.id });
     
@@ -172,6 +174,26 @@ io.on("connection", (socket) => {
       status: 'idle', 
       message: 'You left the search' 
     });
+  });
+
+  // New event: WebRTC connection established successfully
+  socket.on("connectionEstablished", (data) => {
+    const userId = data.userId;
+    const sessionId = data.sessionId;
+    
+    console.log(`WebRTC connection established for user ${userId} in session ${sessionId}`);
+    
+    // Update session status
+    const session = activeSessions.get(sessionId);
+    if (session) {
+      session.connectionStatus = 'connected';
+      
+      // Update user states to in-call (now they're fully connected)
+      userStates.set(session.user1, { state: 'in-call', sessionId, socketId: userStates.get(session.user1)?.socketId });
+      userStates.set(session.user2, { state: 'in-call', sessionId, socketId: userStates.get(session.user2)?.socketId });
+      
+      console.log(`Session ${sessionId} is now fully connected`);
+    }
   });
   // Session-based WebRTC signaling
   socket.on("offerSentToRemote", (data) => {
@@ -182,10 +204,6 @@ io.on("connection", (socket) => {
     if (session && (session.user1 === data.username || session.user2 === data.username)) {
       var offerReceiver = userConnection.find(o => o.user_id === data.remoteUser);
       if (offerReceiver) {
-        // Update user states to in-call
-        userStates.set(data.username, { state: 'in-call', sessionId: data.sessionId, socketId: socket.id });
-        userStates.set(data.remoteUser, { state: 'in-call', sessionId: data.sessionId, socketId: offerReceiver.connectionId });
-        
         socket.to(offerReceiver.connectionId).emit("ReceiveOffer", data);
         console.log("Offer forwarded to receiver in session:", data.sessionId);
       }
